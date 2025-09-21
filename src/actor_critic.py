@@ -1,3 +1,5 @@
+import os
+import random
 import re
 from copy import deepcopy
 from dataclasses import dataclass
@@ -5,11 +7,12 @@ from email.policy import Policy
 from math import isnan
 from typing import TypedDict
 
+import numpy as np
 import torch
 from matplotlib.collections import CircleCollection
 from torch import device, nn
 from torch.nn import functional as F
-from torchrl.data import ListStorage, PrioritizedReplayBuffer
+from torchrl.data import LazyMemmapStorage, PrioritizedReplayBuffer
 
 from src.environment import ChessEnvironment
 
@@ -143,26 +146,31 @@ class TrainingLoop:
         self.update_target(1.0)
 
         self.replay_buffer = PrioritizedReplayBuffer(
-            alpha=0.2, beta=1, storage=ListStorage(20_000)
+            alpha=0.2,
+            beta=1,
+            storage=LazyMemmapStorage(20_000),
         )
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters())
         self.critic_optimizer = torch.optim.Adam(self.critics.parameters())
 
         self.tau = 0.001
-        self.h_target = 0.7
         self.alpha = 1.0  # fixed for now
         self.gamma = 0.99
+        self.episodes = 0
 
-    def train(self, batches: int):
-
+    def train(self, batches: int, save=None):
         for _ in range(batches):
+            print(_)
             self.play_one_batch()
             self.learn()
             self.update_target(self.tau)
+            self.episodes += 1
+            if save is not None:
+                save(self, self.episodes)
 
     def learn(self):
-        if len(self.replay_buffer) < self.batchsize:
+        if len(self.replay_buffer) < 10_000:
             return
 
         memory, info = self.sample_batch()
@@ -320,3 +328,66 @@ class TrainingLoop:
         return torch.stack(
             [env.legal_move_mask() for env in self.environments],
         )
+
+    def save_checkpoint(self, path: str):
+        ckpt = {
+            "actor": self.actor.state_dict(),
+            "critics": self.critics.state_dict(),
+            "actor_opt": self.actor_optimizer.state_dict(),
+            "critic_opt": self.critic_optimizer.state_dict(),
+            "tau": self.tau,
+            "alpha": self.alpha,
+            "gamma": self.gamma,
+            "episodes": self.episodes,
+            "rng": {
+                "torch": torch.get_rng_state(),
+                "cuda": (
+                    torch.cuda.get_rng_state_all()
+                    if torch.cuda.is_available()
+                    else None
+                ),
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+            },
+        }
+
+        os.makedirs(path, exist_ok=True)
+
+        torch.save(ckpt, os.path.join(path, "parameters.ckpt"))
+        # self.replay_buffer.dumps(os.path.join(path, "replay_buffer.ckpt"))
+
+    def load_checkpoint(self, dir: str, map_location=None, strict: bool = True):
+        param_path = os.path.join(dir, "parameters.ckpt")
+
+        ckpt = torch.load(
+            param_path,
+            map_location=map_location,
+            weights_only=False,
+        )
+
+        self.actor.load_state_dict(ckpt["actor"], strict=strict)
+        self.critics.load_state_dict(ckpt["critics"], strict=strict)
+
+        self.update_target(1.0)
+
+        self.actor_optimizer.load_state_dict(ckpt["actor_opt"])
+        self.critic_optimizer.load_state_dict(ckpt["critic_opt"])
+
+        self.tau = ckpt.get("tau", self.tau)
+
+        self.alpha = ckpt.get("alpha", self.alpha)
+        self.gamma = ckpt.get("gamma", self.gamma)
+        self.episodes = ckpt.get("episodes", self.episodes)
+
+        rng = ckpt["rng"]
+
+        torch.set_rng_state(rng["torch"])
+        if torch.cuda.is_available() and rng["cuda"] is not None:
+            torch.cuda.set_rng_state_all(rng["cuda"])
+        random.setstate(rng["python"])
+        np.random.set_state(rng["numpy"])
+
+        # rbuffer_path = os.path.join(dir, "replay_buffer.ckpt")
+        # print(rbuffer_path)
+        # self.replay_buffer.add(ckpt["replay_state"])
+        # self.replay_buffer.loads(rbuffer_path)
