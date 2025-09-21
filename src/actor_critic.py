@@ -158,6 +158,7 @@ class TrainingLoop:
         self.alpha = 1.0  # fixed for now
         self.gamma = 0.99
         self.episodes = 0
+        self.games = 0
 
     def train(self, batches: int, save=None):
         for _ in range(batches):
@@ -310,6 +311,7 @@ class TrainingLoop:
             done.append(finished)
 
             if finished:
+                self.games += 1
                 env.reset()
 
         rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
