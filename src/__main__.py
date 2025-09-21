@@ -20,7 +20,7 @@ def get_training_loop():
 
 
 def save(loop: TrainingLoop, index):
-    if index % 200 == 0:
+    if index % 200 == 0 or (index < 100 and index % 25 == 0):
         loop.save_checkpoint(f"models/actor_critic/{loop.episodes:010d}.ckpt")
 
 

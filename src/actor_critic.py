@@ -9,6 +9,7 @@ from typing import TypedDict
 
 import numpy as np
 import torch
+from IPython import embed
 from matplotlib.collections import CircleCollection
 from torch import device, nn
 from torch.nn import functional as F
@@ -24,10 +25,12 @@ class ResidualConv(nn.Module):
         super().__init__()
 
         self.conv = nn.Sequential(
-            nn.BatchNorm2d(channels),
+            # nn.BatchNorm2d(channels),
+            # nn.LayerNorm(channels),
             nn.Conv2d(channels, channels, kernel_size, padding=padding),
             nn.LeakyReLU(),
-            nn.BatchNorm2d(channels),
+            # nn.LayerNorm(channels),
+            # nn.BatchNorm2d(channels),
             nn.Conv2d(channels, channels, kernel_size, padding=padding),
             nn.LeakyReLU(),
         )
@@ -38,83 +41,67 @@ class ResidualConv(nn.Module):
 
 
 class Actor(nn.Module):
-    def __init__(self, d):
+    def __init__(self, embed_dim, n_heads, head_dim=2):
         super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = head_dim
 
-        self.from_square = nn.Sequential(
-            nn.Conv2d(13, d, 3, padding=1),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            nn.Flatten(-2),
+        self.conv = nn.Sequential(
+            nn.Conv2d(13, embed_dim, 3, padding=1),
+            ResidualConv(embed_dim),
+            ResidualConv(embed_dim),
+            ResidualConv(embed_dim),
+            ResidualConv(embed_dim),
+            ResidualConv(embed_dim),
+            ResidualConv(embed_dim),
         )
 
-        self.to_square = nn.Sequential(
-            nn.Conv2d(13, d, 3, padding=1),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            nn.Flatten(-2),
-        )
+        self.from_square = nn.Linear(embed_dim, head_dim * n_heads)
+        self.to_square = nn.Linear(embed_dim, head_dim * n_heads)
+        self.join_heads = nn.Linear(n_heads, 1)
 
     def forward(self, board: torch.Tensor, move_mask: torch.Tensor):
-        from_square = self.from_square(board)
-        to_square = self.to_square(board)
+        board = self.conv(board)
 
-        # normalize
-        from_square = from_square / torch.norm(
-            from_square, dim=-2, keepdim=True
-        ).clamp_min(1e-8)
+        B, C, _, _ = board.shape
+        H = self.n_heads
 
-        to_square = to_square / torch.norm(to_square, dim=-2, keepdim=True).clamp_min(
-            1 / infinity
+        board = board.view(B, C, 64).transpose(-1, -2)  # (B, 64, C)
+
+        # reshape into heads
+        from_square = self.from_square(board).view(B, 64, H, self.head_dim)
+        to_square = self.to_square(board).view(B, 64, H, self.head_dim)
+
+        # normalize heads
+        from_square = from_square / torch.norm(from_square, dim=-1, keepdim=True)
+        to_square = to_square / torch.norm(to_square, dim=-1, keepdim=True)
+
+        # create multiple heads
+        from_square = from_square.permute(0, 2, 1, 3).reshape(B * H, 64, self.head_dim)
+        to_square = to_square.permute(0, 2, 1, 3).reshape(B * H, 64, self.head_dim)
+
+        # comute multi head cosine similarity
+        multi_head = torch.bmm(from_square, to_square.transpose(-1, -2)).view(
+            B, H, 64, 64
         )
 
-        # generate probs
-        logits = torch.bmm(from_square.transpose(-1, -2), to_square)
+        multi_head = multi_head.permute(0, 2, 3, 1)  # (B, 64, 64, H)
 
+        logits = self.join_heads(multi_head)
+        logits = logits.view(B, 64, 64)
         masked_logits = logits.masked_fill(~move_mask, -infinity)
-        return masked_logits.view(-1, 64**2)
+
+        return masked_logits.view(B, 64**2)
 
 
 class Critic(nn.Module):
-    def __init__(self, d: int):
+    def __init__(self, embed_dim, heads):
         super().__init__()
-        self.d = d
 
-        self.from_square = nn.Sequential(
-            nn.Conv2d(13, d, 3, padding=1),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            nn.Conv2d(d, d, 3, padding=1),
-            nn.Flatten(-2),
-        )
+        self.actor = Actor(embed_dim, heads, 3)
 
-        self.to_square = nn.Sequential(
-            nn.Conv2d(13, d, 3, padding=1),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            ResidualConv(d),
-            nn.Conv2d(d, d, 3, padding=1),
-            nn.Flatten(-2),
-        )
-
-    def forward(self, board, move_mask: torch.Tensor):
-        from_square = self.from_square(board)
-        to_square = self.to_square(board)
-        is_move_legal = torch.where(move_mask, 1.0, 0.0)
-        return torch.bmm(from_square.transpose(-2, -1), to_square) * is_move_legal
+    def forward(self, board: torch.Tensor, move_mask: torch.Tensor):
+        return self.actor(board, move_mask)
 
 
 class ReplayMemory(TypedDict):
@@ -140,8 +127,8 @@ class TrainingLoop:
             ChessEnvironment(max_move_count=max_move_count, device=device)
             for _ in range(batchsize)
         ]
-        self.actor = Actor(16).to(device)
-        self.critics = nn.ModuleList([Critic(16), Critic(16)]).to(device)
+        self.actor = Actor(32, 16, 3).to(device)
+        self.critics = nn.ModuleList([Critic(32, 16), Critic(32, 16)]).to(device)
         self.target_critics = deepcopy(self.critics).to(device)
         self.update_target(1.0)
 
@@ -151,14 +138,14 @@ class TrainingLoop:
             storage=LazyMemmapStorage(20_000),
         )
 
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters())
-        self.critic_optimizer = torch.optim.Adam(self.critics.parameters())
-
         self.tau = 0.001
-        self.alpha = 1.0  # fixed for now
+        self.alpha = 1.0
         self.gamma = 0.99
         self.episodes = 0
         self.games = 0
+
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters())
+        self.critic_optimizer = torch.optim.Adam(self.critics.parameters())
 
     def train(self, batches: int, save=None):
         for _ in range(batches):
@@ -177,10 +164,12 @@ class TrainingLoop:
         memory, info = self.sample_batch()
 
         logits = self.actor(memory["from_state"], memory["from_move_mask"])
-        q_value = self.critic(memory["from_state"], memory["from_move_mask"])
-        assert q_value.size(-1) == 64
+        q_value = self.critic(memory["from_state"], memory["from_move_mask"]).view(
+            -1, 64, 64
+        )
+
         self.train_actor(logits, q_value)
-        assert q_value.size(-1) == 64
+
         self.train_critic(memory, info, q_value)
 
     def sample_batch(self) -> tuple[ReplayMemory, ReplayBufferInfo]:
