@@ -1,5 +1,4 @@
 import chess
-import lightning as L
 import torch
 from torch import logit, nn, optim
 

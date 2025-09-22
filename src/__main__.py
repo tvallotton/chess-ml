@@ -2,7 +2,6 @@ import glob
 import random
 
 import chess
-import lightning as L
 import torch
 
 from .actor_critic import TrainingLoop
