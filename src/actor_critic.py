@@ -139,13 +139,18 @@ class TrainingLoop:
         )
 
         self.tau = 0.001
-        self.alpha = 1.0
+
+        self.log_alpha = nn.Parameter(torch.tensor(0.0)).to(device)
         self.gamma = 0.99
         self.episodes = 0
         self.games = 0
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters())
         self.critic_optimizer = torch.optim.Adam(self.critics.parameters())
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha])
+
+    def alpha(self):
+        return self.log_alpha.exp()
 
     def train(self, batches: int, save=None):
         for _ in range(batches):
@@ -168,8 +173,8 @@ class TrainingLoop:
             -1, 64, 64
         )
 
+        self.train_alpha(logits, memory)
         self.train_actor(logits, q_value)
-
         self.train_critic(memory, info, q_value)
 
     def sample_batch(self) -> tuple[ReplayMemory, ReplayBufferInfo]:
@@ -187,11 +192,20 @@ class TrainingLoop:
         q_value = q_value.view(-1, 64**2)
         logpi = F.log_softmax(logits, dim=-1)
         pi = logpi.exp()
-        soft_value = pi * (q_value - self.alpha * logpi)
+        soft_value = pi * (q_value - self.alpha().detach() * logpi)
         return soft_value.sum(-1)
 
     def actor_loss(self, logits: torch.Tensor, q_value: torch.Tensor):
         return -self.soft_value(logits, q_value.detach())
+
+    def train_alpha(self, logits: torch.Tensor, memory: ReplayMemory):
+        max_entropy = memory["from_move_mask"].sum((-1, -2)).log()
+        dist = torch.distributions.Categorical(logits=logits)
+        entropy = dist.entropy().detach()
+        loss = self.alpha() * (entropy - 0.9 * max_entropy.detach())
+        self.alpha_optimizer.zero_grad()
+        loss.mean().backward()
+        self.alpha_optimizer.step()
 
     def train_critic(
         self, memory: ReplayMemory, info: ReplayBufferInfo, q_value: torch.Tensor
@@ -327,7 +341,7 @@ class TrainingLoop:
             "actor_opt": self.actor_optimizer.state_dict(),
             "critic_opt": self.critic_optimizer.state_dict(),
             "tau": self.tau,
-            "alpha": self.alpha,
+            "log_alpha": self.log_alpha,
             "gamma": self.gamma,
             "episodes": self.episodes,
             "rng": {
@@ -366,7 +380,7 @@ class TrainingLoop:
 
         self.tau = ckpt.get("tau", self.tau)
 
-        self.alpha = ckpt.get("alpha", self.alpha)
+        self.log_alpha = ckpt.get("log_alpha", self.log_alpha)
         self.gamma = ckpt.get("gamma", self.gamma)
         self.episodes = ckpt.get("episodes", self.episodes)
 
