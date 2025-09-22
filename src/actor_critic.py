@@ -143,7 +143,7 @@ class TrainingLoop:
 
         self.tau = 0.001
 
-        self.log_alpha = torch.tensor(0.0, requires_grad=True).to(device)
+        self.log_alpha = torch.tensor(0.0, requires_grad=True, device=device)
         self.gamma = 0.99
         self.episodes = 0
         self.games = 0
