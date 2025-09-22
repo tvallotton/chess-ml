@@ -54,6 +54,9 @@ class Actor(nn.Module):
             ResidualConv(embed_dim),
             ResidualConv(embed_dim),
             ResidualConv(embed_dim),
+            ResidualConv(embed_dim),
+            ResidualConv(embed_dim),
+            ResidualConv(embed_dim),
         )
 
         self.from_square = nn.Linear(embed_dim, head_dim * n_heads)
@@ -95,10 +98,10 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self, embed_dim, heads):
+    def __init__(self, embed_dim, heads, head_dim):
         super().__init__()
 
-        self.actor = Actor(embed_dim, heads, 3)
+        self.actor = Actor(embed_dim, heads, head_dim)
 
     def forward(self, board: torch.Tensor, move_mask: torch.Tensor):
         return self.actor(board, move_mask)
@@ -127,8 +130,8 @@ class TrainingLoop:
             ChessEnvironment(max_move_count=max_move_count, device=device)
             for _ in range(batchsize)
         ]
-        self.actor = Actor(32, 16, 3).to(device)
-        self.critics = nn.ModuleList([Critic(32, 16), Critic(32, 16)]).to(device)
+        self.actor = Actor(32, 20, 3).to(device)
+        self.critics = nn.ModuleList([Critic(32, 16, 3), Critic(32, 16, 3)]).to(device)
         self.target_critics = deepcopy(self.critics).to(device)
         self.update_target(1.0)
 
@@ -391,8 +394,3 @@ class TrainingLoop:
             torch.cuda.set_rng_state_all(rng["cuda"])
         random.setstate(rng["python"])
         np.random.set_state(rng["numpy"])
-
-        # rbuffer_path = os.path.join(dir, "replay_buffer.ckpt")
-        # print(rbuffer_path)
-        # self.replay_buffer.add(ckpt["replay_state"])
-        # self.replay_buffer.loads(rbuffer_path)
