@@ -330,12 +330,12 @@ class TrainingLoop:
     def state(self) -> torch.Tensor:
         return torch.stack(
             [env.state() for env in self.environments],
-        )
+        ).to(self.device)
 
     def legal_move_mask(self) -> torch.Tensor:
         return torch.stack(
             [env.legal_move_mask() for env in self.environments],
-        )
+        ).to(self.device)
 
     def save_checkpoint(self, path: str):
         ckpt = {
