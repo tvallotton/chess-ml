@@ -19,15 +19,20 @@ PIECE_VALUE = {
 
 @dataclass
 class VectorEmbeddings:
-    _board: chess.Board
+    board: chess.Board
     device: str = "cpu"
 
-    def legal_moves_mask(self):
-        legal_moves = torch.zeros((64, 64), dtype=bool, device=self.device)
-        for move in self._board.legal_moves:
+    # def flip_mask_coordinate(self, mask: torch.Tensor):
 
-            from_sq = self.to_relative(move.from_square)
-            to_sq = self.to_relative(move.to_square)
+    def legal_moves_mask(self, perspective=None):
+        if perspective is None:
+            perspective = self.board.turn
+
+        legal_moves = torch.zeros((64, 64), dtype=bool, device=self.device)
+        for move in self.board.legal_moves:
+
+            from_sq = self.to_relative(move.from_square, perspective)
+            to_sq = self.to_relative(move.to_square, perspective)
 
             legal_moves[from_sq, to_sq] = True
 
@@ -37,7 +42,7 @@ class VectorEmbeddings:
 
         from_r, from_c, to_row, to_col = torch.unravel_index(move, (8, 8, 8, 8))
 
-        if not self._board.turn:
+        if not self.board.turn:
             from_r = 7 - from_r
             from_c = 7 - from_c
             to_row = 7 - to_row
@@ -53,48 +58,54 @@ class VectorEmbeddings:
 
     def to_absolute(self, square: torch.Tensor) -> chess.Square:
         row, col = torch.unravel_index(square, (8, 8))
-        if not self._board.turn:
+        if not self.board.turn:
             row = 7 - col
             col = 7 - col
         row = 7 - row
         return chess.square(rank_index=int(row), file_index=int(col))
 
-    def to_relative(self, square: chess.Square) -> torch.Tensor:
+    def to_relative(self, square: chess.Square, perspective) -> torch.Tensor:
         row = chess.square_rank(square)
         col = chess.square_file(square)
 
         row = 7 - row
 
-        if not self._board.turn:
+        if not perspective:
             row = 7 - row
             col = 7 - col
         return torch.tensor(
             np.ravel_multi_index((row, col), (8, 8)), device=self.device
         )
 
-    def board_tensor(self):
+    def board_tensor(self, perspective=None):
+        if perspective is None:
+            perspective = self.board.turn
+
         board = torch.zeros((12, 8, 8))
-        movable_squares = torch.ones(1, 8, 8)
+        ones = torch.ones(1, 8, 8)
+        valid_squares = ones
+        is_turn = ones if self.board.turn == perspective else ones * 0
 
         for square in range(0, 64):
-            piece = self._board.piece_at(square)
+            piece = self.board.piece_at(square)
             if piece is None:
                 continue
 
             column = 7 - square % 8
             row = square // 8
-            channel = 6 * (piece.color != self._board.turn) + piece.piece_type - 1
+            channel = 6 * (piece.color != perspective) + piece.piece_type - 1
             board[channel, row, column] = 1.0
 
-        if self._board.turn:
+        if perspective:
             board = torch.flip(board, (-2, -1))
 
-        return torch.cat((board, movable_squares), dim=0)
+        return torch.cat((board, valid_squares, is_turn), dim=0)
 
 
 @dataclass
 class ChessEnvironment:
     board: chess.Board = field(default_factory=chess.Board)
+    opponent_material_difference = 0.0
     move_count: int = 0
     max_move_count: int = 50
     device: str = "cpu"
@@ -102,11 +113,13 @@ class ChessEnvironment:
     def into_move(self, move: torch.Tensor):
         return VectorEmbeddings(self.board, self.device).into_move(move)
 
-    def state(self):
-        return VectorEmbeddings(self.board, self.device).board_tensor()
+    def state(self, perspective=None):
+        return VectorEmbeddings(self.board, self.device).board_tensor(
+            perspective=perspective
+        )
 
-    def legal_move_mask(self):
-        return VectorEmbeddings(self.board, self.device).legal_moves_mask()
+    def legal_move_mask(self, perspective=None):
+        return VectorEmbeddings(self.board, self.device).legal_moves_mask(perspective)
 
     def reset(self):
         self.move_count = 0
@@ -126,7 +139,9 @@ class ChessEnvironment:
             return r, True
 
         ending_material = self.material_balance(turn)
-        reward = ending_material - starting_material
+        player_material_difference = ending_material - starting_material
+        reward = player_material_difference - self.opponent_material_difference
+        self.opponent_material_difference = player_material_difference
         return reward, self.move_count >= self.max_move_count
 
     def material_balance(self, turn):
@@ -159,4 +174,12 @@ class ChessEnvironment:
 
         promotion_rank = white_promo if self.board.turn else black_promo
 
+        return is_pawn and move.to_square in promotion_rank
+        return is_pawn and move.to_square in promotion_rank
+        return is_pawn and move.to_square in promotion_rank
+        return is_pawn and move.to_square in promotion_rank
+        return is_pawn and move.to_square in promotion_rank
+        return is_pawn and move.to_square in promotion_rank
+        return is_pawn and move.to_square in promotion_rank
+        return is_pawn and move.to_square in promotion_rank
         return is_pawn and move.to_square in promotion_rank

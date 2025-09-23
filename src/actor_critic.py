@@ -13,7 +13,7 @@ from IPython import embed
 from matplotlib.collections import CircleCollection
 from torch import device, nn
 from torch.nn import functional as F
-from torchrl.data import LazyMemmapStorage, PrioritizedReplayBuffer
+from torchrl.data import LazyMemmapStorage, ReplayBuffer
 
 from src.environment import ChessEnvironment
 
@@ -47,7 +47,7 @@ class Actor(nn.Module):
         self.head_dim = head_dim
 
         self.conv = nn.Sequential(
-            nn.Conv2d(13, embed_dim, 3, padding=1),
+            nn.Conv2d(14, embed_dim, 3, padding=1),
             ResidualConv(embed_dim),
             ResidualConv(embed_dim),
             ResidualConv(embed_dim),
@@ -110,9 +110,11 @@ class Critic(nn.Module):
 class ReplayMemory(TypedDict):
     reward: torch.Tensor
     from_state: torch.Tensor
-    to_state: torch.Tensor
     from_move_mask: torch.Tensor
-    to_move_mask: torch.Tensor
+    to_move_mask_as_opponent: torch.Tensor
+    to_state_as_opponent: torch.Tensor
+    to_move_mask_as_player: torch.Tensor
+    to_state_as_player: torch.Tensor
     move: torch.Tensor
     done: torch.Tensor
 
@@ -135,15 +137,15 @@ class TrainingLoop:
         self.target_critics = deepcopy(self.critics).to(device)
         self.update_target(1.0)
 
-        self.replay_buffer = PrioritizedReplayBuffer(
-            alpha=0.2,
-            beta=1,
-            storage=LazyMemmapStorage(20_000),
+        self.replay_buffer = ReplayBuffer(
+            storage=LazyMemmapStorage(500_000),
         )
 
         self.tau = 0.001
 
-        self.log_alpha = torch.tensor(0.0, requires_grad=True, device=device)
+        self.log_alpha = nn.Parameter(
+            torch.tensor(0.0, requires_grad=True, device=device)
+        )
         self.gamma = 0.99
         self.episodes = 0
         self.games = 0
@@ -161,7 +163,6 @@ class TrainingLoop:
             self.play_one_batch()
             self.learn()
             self.update_target(self.tau)
-            self.episodes += 1
             if save is not None:
                 save(self, self.episodes)
 
@@ -178,7 +179,8 @@ class TrainingLoop:
 
         self.train_alpha(logits, memory)
         self.train_actor(logits, q_value)
-        self.train_critic(memory, info, q_value)
+        self.train_critic(memory, info)
+        self.episodes += 1
 
     def sample_batch(self) -> tuple[ReplayMemory, ReplayBufferInfo]:
         batch, info = self.replay_buffer.sample(self.batchsize, return_info=True)
@@ -205,35 +207,42 @@ class TrainingLoop:
         max_entropy = memory["from_move_mask"].sum((-1, -2)).log()
         dist = torch.distributions.Categorical(logits=logits)
         entropy = dist.entropy().detach()
-        loss = self.alpha() * (entropy - 0.9 * max_entropy.detach())
+        loss = self.log_alpha * (entropy - 0.8 * max_entropy.detach())
         self.alpha_optimizer.zero_grad()
         loss.mean().backward()
         self.alpha_optimizer.step()
 
-    def train_critic(
-        self, memory: ReplayMemory, info: ReplayBufferInfo, q_value: torch.Tensor
-    ):
-        assert q_value.size(-1) == 64
+    def train_critic(self, memory: ReplayMemory, info: ReplayBufferInfo):
 
         with torch.no_grad():
+            # use player's coordinates to evaluate game
             next_q_value = self.target_critic(
-                memory["to_state"], memory["to_move_mask"]
+                memory["to_state_as_player"], memory["to_move_mask_as_player"]
             )
-            next_logits = self.actor(memory["to_state"], memory["to_move_mask"])
+            # use opponent's coordinates on actor
+            next_logits = self.actor(
+                memory["to_state_as_opponent"], memory["to_move_mask_as_opponent"]
+            )
+            # change to player coordinates
+            next_logits = (
+                next_logits.view(-1, 64, 64).flip(-1, -2).view(-1, 64**2).detach()
+            )
             next_soft_value = self.soft_value(next_logits, next_q_value)
             bootstrap = torch.where(memory["done"], 0.0, next_soft_value)
             y = memory["reward"] + self.gamma * bootstrap
 
-        q_value = torch.gather(
-            q_value.flatten(-2), 1, memory["move"].view(-1, 1)
-        ).flatten()
+        q_value0 = self.critics[0](memory["from_state"], memory["from_move_mask"])
+        q_value1 = self.critics[1](memory["from_state"], memory["from_move_mask"])
+        q_value = (q_value0 + q_value1) / 2
+        q_value = torch.gather(q_value, 1, memory["move"].view(-1, 1)).flatten()
 
         mse = (q_value - y) ** 2
-        weight = info["_weight"]
-        loss = (weight * mse).sum() / weight.mean()
+
+        loss = mse.mean()
 
         self.critic_optimizer.zero_grad()
         loss.backward()
+        print(f"critic loss: {loss.item():+.4f}")
         self.critic_optimizer.step()
 
         td_error = (q_value - y).detach()
@@ -243,9 +252,10 @@ class TrainingLoop:
     def train_actor(self, logits: torch.Tensor, q_value: torch.Tensor):
 
         self.actor_optimizer.zero_grad()
-        loss = self.actor_loss(logits, q_value)
+        loss = self.actor_loss(logits, q_value).mean(0)
         assert not loss.isnan().any()
-        loss.mean(0).backward()
+        loss.backward()
+        print(f"actor loss: {loss.item():+.4f}")
         self.actor_optimizer.step()
 
     def critic(self, state: torch.Tensor, move_mask: torch.Tensor):
@@ -286,50 +296,37 @@ class TrainingLoop:
         dist = torch.distributions.Categorical(logits=logits)
         moves = dist.sample()
 
-        reward, next_masks, next_states, done = self.push_moves(moves)
-
-        for i in range(self.batchsize):
-            entry = ReplayMemory(
-                move=moves[i],
-                reward=reward[i],
-                from_state=from_state[i],
-                to_state=next_states[i],
-                from_move_mask=from_mask[i],
-                to_move_mask=next_masks[i],
-                done=done[i],
-            )
-            self.replay_buffer.add(entry)
+        self.push_moves(moves)
 
     def push_moves(self, moves: torch.Tensor):
-
-        rewards = []
-        next_masks = []
-        next_states = []
-        done = []
-
         for env, move in zip(self.environments, moves):
-            move = env.into_move(move)
-            reward, finished = env.play(move)
+            player = env.board.turn
+            from_move_mask = env.legal_move_mask()
+            from_state = env.state()
 
-            next_masks.append(env.legal_move_mask())
-            rewards.append(reward)
-            next_states.append(env.state())
-            done.append(finished)
+            reward, finished = env.play(env.into_move(move))
+
+            memory = ReplayMemory(
+                reward=torch.tensor(reward),
+                from_state=from_state,
+                from_move_mask=from_move_mask,
+                to_state_as_player=env.state(player),
+                to_state_as_opponent=env.state(not player),
+                to_move_mask_as_player=env.legal_move_mask(player),
+                to_move_mask_as_opponent=env.legal_move_mask(not player),
+                move=move,
+                done=torch.tensor(finished),
+            )
+
+            self.replay_buffer.add(memory)
 
             if finished:
                 self.games += 1
                 env.reset()
 
-        rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
-        next_masks = torch.stack(next_masks).to(self.device)
-        next_states = torch.stack(next_states).to(self.device)
-        done = torch.tensor(done).to(self.device)
-
-        return (rewards, next_masks, next_states, done)
-
-    def state(self) -> torch.Tensor:
+    def state(self, perspective=None) -> torch.Tensor:
         return torch.stack(
-            [env.state() for env in self.environments],
+            [env.state(perspective) for env in self.environments],
         ).to(self.device)
 
     def legal_move_mask(self) -> torch.Tensor:
@@ -347,6 +344,7 @@ class TrainingLoop:
             "log_alpha": self.log_alpha,
             "gamma": self.gamma,
             "episodes": self.episodes,
+            "games": self.games,
             "rng": {
                 "torch": torch.get_rng_state(),
                 "cuda": (
@@ -372,7 +370,7 @@ class TrainingLoop:
             map_location=map_location,
             weights_only=False,
         )
-
+        self.games = ckpt.get("games", self.games)
         self.actor.load_state_dict(ckpt["actor"], strict=strict)
         self.critics.load_state_dict(ckpt["critics"], strict=strict)
 
@@ -384,6 +382,8 @@ class TrainingLoop:
         self.tau = ckpt.get("tau", self.tau)
 
         self.log_alpha = ckpt.get("log_alpha", self.log_alpha)
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=0.001)
+
         self.gamma = ckpt.get("gamma", self.gamma)
         self.episodes = ckpt.get("episodes", self.episodes)
 

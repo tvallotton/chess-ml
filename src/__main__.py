@@ -8,11 +8,12 @@ from .actor_critic import TrainingLoop
 
 
 def get_training_loop():
-    loop = TrainingLoop(128, "cpu")
+    loop = TrainingLoop(512, "cpu")
     model_paths = glob.glob("models/actor_critic/*")
     model_paths.sort()
 
     if model_paths != []:
+        print("loading", model_paths[-1])
         loop.load_checkpoint(model_paths[-1])
 
     return loop
