@@ -153,6 +153,7 @@ class TrainingLoop:
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters())
         self.critic_optimizer = torch.optim.Adam(self.critics.parameters())
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha])
+        self.wandb_run = None
 
     def alpha(self):
         return self.log_alpha.exp()
@@ -177,10 +178,18 @@ class TrainingLoop:
             -1, 64, 64
         )
 
-        self.train_alpha(logits, memory)
-        self.train_actor(logits, q_value)
-        self.train_critic(memory, info)
+        alpha_loss = self.train_alpha(logits, memory)
+        actor_loss = self.train_actor(logits, q_value)
+        critic_loss = self.train_critic(memory, info)
         self.episodes += 1
+        if self.wandb_run:
+            self.wandb_run.log(
+                {
+                    "alpha_loss": alpha_loss,
+                    "actor_loss": actor_loss,
+                    "critic_loss": critic_loss,
+                }
+            )
 
     def sample_batch(self) -> tuple[ReplayMemory, ReplayBufferInfo]:
         batch, info = self.replay_buffer.sample(self.batchsize, return_info=True)
@@ -211,6 +220,7 @@ class TrainingLoop:
         self.alpha_optimizer.zero_grad()
         loss.mean().backward()
         self.alpha_optimizer.step()
+        return loss
 
     def train_critic(self, memory: ReplayMemory, info: ReplayBufferInfo):
 
@@ -248,6 +258,7 @@ class TrainingLoop:
         td_error = (q_value - y).detach()
         priority = td_error.abs() + 1e-6
         self.replay_buffer.update_priority(info["index"], priority)
+        return loss
 
     def train_actor(self, logits: torch.Tensor, q_value: torch.Tensor):
 
@@ -257,6 +268,7 @@ class TrainingLoop:
         loss.backward()
         print(f"actor loss: {loss.item():+.4f}")
         self.actor_optimizer.step()
+        return loss
 
     def critic(self, state: torch.Tensor, move_mask: torch.Tensor):
 
