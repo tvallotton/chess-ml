@@ -197,9 +197,6 @@ class TrainingLoop:
         for k in batch:
             batch[k] = batch[k].to(self.device)
 
-        info["_weight"] = info["_weight"].to(self.device)
-        info["index"] = info["index"].to(self.device)
-
         return batch, info
 
     def soft_value(self, logits: torch.Tensor, q_value: torch.Tensor):
