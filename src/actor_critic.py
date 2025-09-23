@@ -185,9 +185,9 @@ class TrainingLoop:
         if self.wandb_run:
             self.wandb_run.log(
                 {
-                    "alpha_loss": alpha_loss,
-                    "actor_loss": actor_loss,
-                    "critic_loss": critic_loss,
+                    "alpha_loss": alpha_loss.detach().item(),
+                    "actor_loss": actor_loss.detach().item(),
+                    "critic_loss": critic_loss.detach().item(),
                 }
             )
 
