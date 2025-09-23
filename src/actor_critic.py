@@ -252,7 +252,7 @@ class TrainingLoop:
 
         self.critic_optimizer.zero_grad()
         loss.backward()
-        print(f"critic loss: {loss.item():+.4f}")
+
         self.critic_optimizer.step()
 
         td_error = (q_value - y).detach()
@@ -266,7 +266,6 @@ class TrainingLoop:
         loss = self.actor_loss(logits, q_value).mean(0)
         assert not loss.isnan().any()
         loss.backward()
-        print(f"actor loss: {loss.item():+.4f}")
         self.actor_optimizer.step()
         return loss
 
